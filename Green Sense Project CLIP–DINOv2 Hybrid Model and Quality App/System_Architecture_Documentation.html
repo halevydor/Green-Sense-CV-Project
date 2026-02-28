@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Greenspace Quality Classifier - System Architecture</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            line-height: 1.6;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 20px;
+            color: #333;
+        }
+        h1 {
+            color: #2c5f2d;
+            border-bottom: 3px solid #4a8b4d;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #3d7c3f;
+            margin-top: 30px;
+            border-bottom: 2px solid #e0e0e0;
+            padding-bottom: 8px;
+        }
+        h3 {
+            color: #4a8b4d;
+            margin-top: 20px;
+        }
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Consolas', monospace;
+        }
+        pre {
+            background: #f8f8f8;
+            border-left: 4px solid #4a8b4d;
+            padding: 15px;
+            overflow-x: auto;
+            border-radius: 4px;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 20px 0;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
+        }
+        th {
+            background-color: #4a8b4d;
+            color: white;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        .workflow {
+            background: #e8f5e9;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .section {
+            margin-bottom: 40px;
+        }
+        ul {
+            margin-left: 20px;
+        }
+        li {
+            margin: 8px 0;
+        }
+        .highlight {
+            background: #fff9c4;
+            padding: 2px 4px;
+        }
+        .emoji {
+            font-size: 1.2em;
+        }
+    </style>
+</head>
+<body>
+
+<h1><span class="emoji">🌳</span> Greenspace Quality Classifier - System Architecture</h1>
+
+<div class="section">
+    <h2>Overview</h2>
+    <p>A computer vision system that analyzes park/greenspace images and classifies them as <strong>Healthy</strong>, <strong>Dried</strong>, or <strong>Contaminated</strong> using AI models.</p>
+</div>
+
+<div class="section">
+    <h2><span class="emoji">🎯</span> Core Workflow</h2>
+    <div class="workflow">
+        <pre>
+1. Upload Image
+   ↓
+2. Detect Vegetation Regions (HSV color detection)
+   ↓
+3. Extract Features
+   ├─ CLIP Embeddings (scene understanding)
+   └─ Color/Texture Statistics
+   ↓
+4. Combine Features (~600 dimensions)
+   ↓
+5. Trained Classifier (Random Forest)
+   ↓
+6. Prediction: Healthy / Dried / Contaminated
+        </pre>
+    </div>
+</div>
+
+<div class="section">
+    <h2><span class="emoji">📁</span> File Structure & Responsibilities</h2>
+    
+    <h3>1. User Interface</h3>
+    <h4><code>app.py</code></h4>
+    <ul>
+        <li><strong>Streamlit web app</strong> for single-image analysis</li>
+        <li>Loads all models at startup (cached)</li>
+        <li>Displays predictions with confidence scores</li>
+        <li><strong>Flow</strong>: Image Upload → Feature Extraction → Classification → Display Results</li>
+    </ul>
+
+    <h3>2. Vegetation Detection</h3>
+    <h4><code>vegetation_detector.py</code></h4>
+    <ul>
+        <li><strong>Purpose</strong>: Find vegetation regions in images</li>
+        <li><strong>Method</strong> (Cloud Version): HSV color filtering
+            <ul>
+                <li>Green pixels (Hue 40-90°) = healthy vegetation</li>
+                <li>Yellow/Brown pixels (Hue 10-30°) = dried vegetation</li>
+            </ul>
+        </li>
+        <li><strong>Output</strong>: Bounding boxes <code>[(x1, y1, x2, y2), ...]</code></li>
+        <li><strong>Memory</strong>: ~10MB (lightweight!)</li>
+    </ul>
+
+    <h3>3. Feature Extraction</h3>
+    
+    <h4><code>scene_features.py</code></h4>
+    <ul>
+        <li><strong>Purpose</strong>: Extract whole-scene semantic features</li>
+        <li><strong>Model</strong>: CLIP (ViT-B/32)</li>
+        <li><strong>Prompts</strong>: <code>["healthy park", "dried vegetation", "contaminated area", ...]</code></li>
+        <li><strong>Output</strong>: 
+            <ul>
+                <li>512-dim embedding</li>
+                <li>Prompt similarity scores</li>
+            </ul>
+        </li>
+    </ul>
+
+    <h4><code>vegetation_features.py</code></h4>
+    <ul>
+        <li><strong>Purpose</strong>: Extract features from vegetation crops</li>
+        <li><strong>Components</strong>:
+            <ul>
+                <li><code>VegetationFeatureExtractor</code>: CLIP embeddings of cropped regions</li>
+                <li><code>ColorTextureAnalyzer</code>: HSV stats, texture patterns</li>
+            </ul>
+        </li>
+        <li><strong>Output</strong>: Combined feature vector (~600 dimensions)</li>
+    </ul>
+
+    <h4><code>feature_pipeline.py</code></h4>
+    <ul>
+        <li><strong>Purpose</strong>: Orchestrate full pipeline</li>
+        <li><strong>Steps</strong>:
+            <ol>
+                <li>Load image</li>
+                <li>Detect vegetation → <code>vegetation_detector.py</code></li>
+                <li>Extract scene features → <code>scene_features.py</code></li>
+                <li>Extract vegetation features → <code>vegetation_features.py</code></li>
+                <li>Combine all features</li>
+            </ol>
+        </li>
+        <li><strong>Used by</strong>: Training scripts</li>
+    </ul>
+
+    <h3>4. Training & Classification</h3>
+    
+    <h4><code>train_classifier.py</code></h4>
+    <ul>
+        <li><strong>Purpose</strong>: Train the final classifier</li>
+        <li><strong>Input</strong>: Extracted features from dataset</li>
+        <li><strong>Model</strong>: Random Forest / Logistic Regression</li>
+        <li><strong>Output</strong>: 
+            <ul>
+                <li><code>models/best_classifier.pkl</code> (trained model)</li>
+                <li><code>models/scaler.pkl</code> (feature normalization)</li>
+                <li><code>models/confusion_matrix.png</code> (evaluation)</li>
+            </ul>
+        </li>
+    </ul>
+
+    <h4><code>extract_features.py</code></h4>
+    <ul>
+        <li><strong>Purpose</strong>: Batch feature extraction from dataset</li>
+        <li><strong>Process</strong>: Run <code>feature_pipeline.py</code> on all images</li>
+        <li><strong>Output</strong>: <code>features/</code> folder with <code>.npy</code> files</li>
+    </ul>
+
+    <h3>5. Dataset Management</h3>
+    
+    <h4><code>dataset.py</code></h4>
+    <ul>
+        <li><strong>Purpose</strong>: PyTorch dataset loader</li>
+        <li><strong>Structure</strong>: <code>Data/{Healthy,Dried,Contaminated}/images/</code></li>
+        <li><strong>Transforms</strong>: CLIP preprocessing (224×224, normalize)</li>
+    </ul>
+
+    <h3>6. Configuration</h3>
+    
+    <h4><code>config.py</code></h4>
+    <ul>
+        <li><strong>Purpose</strong>: Centralized settings</li>
+        <li><strong>Contains</strong>:
+            <ul>
+                <li>Model paths</li>
+                <li>Image sizes</li>
+                <li>CLIP prompts</li>
+                <li>Vegetation queries</li>
+                <li>Device selection (CPU/GPU)</li>
+            </ul>
+        </li>
+    </ul>
+
+    <h3>7. Visualization & Testing</h3>
+    
+    <h4><code>visualize_batch.py</code></h4>
+    <ul>
+        <li>Show vegetation detection boxes on images</li>
+        <li>Save annotated results to <code>outputs/</code></li>
+    </ul>
+
+    <h4><code>test_evaluation.py</code></h4>
+    <ul>
+        <li>Run classifier on test set</li>
+        <li>Generate metrics (accuracy, precision, recall)</li>
+    </ul>
+</div>
+
+<div class="section">
+    <h2><span class="emoji">🔄</span> Data Flow Examples</h2>
+    
+    <h3>Training Phase</h3>
+    <pre>
+1. Images in Data/ folders
+   ↓
+2. extract_features.py
+   ↓ (uses feature_pipeline.py)
+3. Features saved to features/ folder
+   ↓
+4. train_classifier.py
+   ↓
+5. models/best_classifier.pkl saved
+    </pre>
+
+    <h3>Inference Phase (App)</h3>
+    <pre>
+1. User uploads image to app.py
+   ↓
+2. vegetation_detector.py → Find green regions
+   ↓
+3. scene_features.py → CLIP embeddings
+   ↓
+4. vegetation_features.py → Color/texture stats
+   ↓
+5. Combine features
+   ↓
+6. Load models/best_classifier.pkl
+   ↓
+7. Predict: Healthy / Dried / Contaminated
+    </pre>
+</div>
+
+<div class="section">
+    <h2><span class="emoji">🧠</span> Key AI Models Used</h2>
+    
+    <table>
+        <thead>
+            <tr>
+                <th>Model</th>
+                <th>Purpose</th>
+                <th>Memory</th>
+                <th>Location</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>CLIP ViT-B/32</strong></td>
+                <td>Scene understanding</td>
+                <td>~300MB</td>
+                <td>scene_features.py</td>
+            </tr>
+            <tr>
+                <td><strong>Color Detection</strong></td>
+                <td>Find vegetation (HSV)</td>
+                <td>~10MB</td>
+                <td>vegetation_detector.py</td>
+            </tr>
+            <tr>
+                <td><strong>Random Forest</strong></td>
+                <td>Final classification</td>
+                <td>~5MB</td>
+                <td>models/best_classifier.pkl</td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+<div class="section">
+    <h2><span class="emoji">🌐</span> Cloud Deployment (Streamlit)</h2>
+    
+    <h3>Memory Optimizations Applied:</h3>
+    <ul>
+        <li>✅ Disabled GroundingDINO (saved 400MB)</li>
+        <li>✅ Auto-resize images to max 1024px</li>
+        <li>✅ Limited CPU threads (<code>OMP_NUM_THREADS=1</code>)</li>
+        <li>✅ Use <code>opencv-python-headless</code> (no GUI libs)</li>
+    </ul>
+
+    <h3>Files Used in Cloud:</h3>
+    <ul>
+        <li><code>app.py</code> (entry point)</li>
+        <li><code>vegetation_detector.py</code> (lightweight mode)</li>
+        <li><code>scene_features.py</code> (CLIP only)</li>
+        <li><code>vegetation_features.py</code> (color analyzer)</li>
+        <li><code>models/</code> folder (trained classifier)</li>
+        <li><code>requirements.txt</code> (dependencies)</li>
+        <li><code>packages.txt</code> (system libs: libgl1)</li>
+    </ul>
+</div>
+
+<div class="section">
+    <h2><span class="emoji">📊</span> Feature Vector Breakdown</h2>
+    
+    <pre>
+Final Feature Vector (~600 dims):
+├─ Scene CLIP (512 dims)
+├─ Prompt Scores (10 dims)
+├─ Vegetation CLIP (512 dims, pooled)
+└─ Color/Texture Stats (~60 dims)
+   ├─ Mean HSV
+   ├─ Std HSV
+   ├─ Dominant colors (K-means)
+   └─ Texture (GLCM)
+    </pre>
+</div>
+
+<div class="section">
+    <h2><span class="emoji">🛠️</span> Development Scripts</h2>
+    
+    <ul>
+        <li><code>visualize_demo.py</code> - Quick single-image test</li>
+        <li><code>inspect_coverage.py</code> - Check dataset coverage</li>
+        <li><code>test_mask.py</code> - Debug vegetation masks</li>
+    </ul>
+</div>
+
+<div class="section">
+    <h2><span class="emoji">📦</span> Key Dependencies</h2>
+    
+    <p>See <code>requirements.txt</code>:</p>
+    <ul>
+        <li><code>torch</code> - Deep learning framework</li>
+        <li><code>open_clip_torch</code> - CLIP model implementation</li>
+        <li><code>opencv-python-headless</code> - Image processing (cloud-optimized)</li>
+        <li><code>scikit-learn</code> - ML classifier training</li>
+        <li><code>streamlit</code> - Web app framework</li>
+        <li><code>transformers</code> - NLP models (for GroundingDINO text encoding)</li>
+    </ul>
+</div>
+
+<div style="margin-top: 50px; padding-top: 20px; border-top: 2px solid #e0e0e0; text-align: center; color: #666;">
+    <p><em>Greenspace Quality Classifier - Computer Vision Project</em></p>
+    <p>Generated: January 2026</p>
+</div>
+
+</body>
+</html>
