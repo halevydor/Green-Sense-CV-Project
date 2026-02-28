@@ -45,8 +45,8 @@ This module feeds training data into the classification pipelines.
 
 Before training, generated images can be evaluated using:
 
--     Manual Validation
--     NIQE (No-Reference Image Quality Evaluator)
+- Manual Validation
+- NIQE (No-Reference Image Quality Evaluator)
 
 
 Purpose: - Remove low-quality synthetic samples - Improve dataset
