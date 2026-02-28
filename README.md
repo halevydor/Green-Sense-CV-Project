@@ -9,12 +9,9 @@ evaluated components that address different stages of the pipeline:
 
 -   Synthetic image generation
 -   Image quality validation
--   CNN baseline modeling
--   Vision Transformer modeling
+-   CNN baseline modeling (Resnet50)
+-   Vision Transformer modeling (VIT16B)
 -   Hybrid Vision-Language modeling (CLIP + DINOv2)
-
-Each module was developed, trained, and tested separately to enable
-controlled experimentation and clear benchmarking.
 
 ------------------------------------------------------------------------
 
@@ -35,30 +32,26 @@ model robustness under domain shift.
 
 ## 1️⃣ Synthetic Image Generation (FIBO)
 
-Synthetic vegetation images are generated using a FIBO-based pipeline.
+Synthetic vegetation images are generated using a FIBO - visual generative model.
 
 Purpose: - Create class-balanced datasets - Simulate vegetation states -
-Enable controlled experiments
-
-Includes: - Class-structured dataset generation - Evaluation using FID,
-LPIPS, SSIM, PSNR - Experimental workflow for downstream training
+Enable controlled experiments.
 
 This module feeds training data into the classification pipelines.
 
 ------------------------------------------------------------------------
 
-## 2️⃣ Image Quality Filtering (NIQE + Depth Consistency)
+## 2️⃣ Image Quality Filtering (NIQE)
 
 Before training, generated images can be evaluated using:
 
--   NIQE (No-Reference Image Quality Evaluator)
--   Depth Consistency scoring using MiDaS
+-     Manual Validation
+-     NIQE (No-Reference Image Quality Evaluator)
+
 
 Purpose: - Remove low-quality synthetic samples - Improve dataset
 realism - Measure structural coherence
 
-Includes: - CLI batch scoring - Streamlit dashboard - Depth alignment
-evaluation
 
 ------------------------------------------------------------------------
 
@@ -70,7 +63,7 @@ Characteristics: - ImageNet pretrained ResNet50 - Backbone frozen -
 Fine-tuned classification head - 3-class Cross Entropy training - Train
 / Validate / Test split
 
-Purpose: - Establish CNN baseline - Measure synthetic dataset
+Purpose: - Establish CNN baseline (from prior study)- Measure synthetic dataset
 effectiveness - Compare against transformer architectures
 
 Outputs: - Trained model weights - Metrics JSON - Confusion matrix -
@@ -167,8 +160,7 @@ The repository is organized into independent submodules:
 
 -   Synthetic Generation
 -   NIQE Quality Analyzer
--   ResNet50 Module
--   ViT-B16 Module
+-   ResNet50 Module and T-B16 Module
 -   VLM Sense Hybrid Pipeline
 
 Each subfolder contains its own README with detailed instructions.
@@ -181,8 +173,6 @@ Each subfolder contains its own README with detailed instructions.
 -   Synthetic-to-real domain shift experimentation
 -   CNN vs Transformer vs Vision-Language comparison
 -   Explicit metric reporting
--   Reproducible Conda environment
--   Independent evaluation per component
 
 ------------------------------------------------------------------------
 
