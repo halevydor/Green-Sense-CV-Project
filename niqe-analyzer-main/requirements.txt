@@ -1,9 +1,0 @@
-numpy
-scipy
-Pillow
-streamlit
-pandas
-opencv-python
-torch
-transformers
-matplotlib
