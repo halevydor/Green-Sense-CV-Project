@@ -1,0 +1,519 @@
+# -*- coding: utf-8 -*-
+"""
+Fine-tune ViT-B/16 ONLY on new generated Dried images.
+
+הרעיון:
+- טוענים את המודל המאומן הקיים (על התמונות האמיתיות + מה שכבר עשית).
+- מקפיאים את כל הפרמטרים חוץ מה-head.
+- עושים Fine-Tuning קצר על תמונות Dried מג'ונרטות חדשות בלבד.
+- ה-Train/Validate/Test כאן הם רק על Dried Generated.
+
+שמור כ: VITB16FineTuneDriedGenerated.py
+הרצה (מתוך תיקיית הפרויקט, בסביבת GreenSpace):
+    python VITB16FineTuneDriedGenerated.py
+"""
+
+import os
+import json
+import random
+from pathlib import Path
+from typing import List, Tuple
+
+import numpy as np
+import cv2
+import albumentations as A
+
+from sklearn.metrics import (
+    accuracy_score,
+    precision_recall_fscore_support,
+    classification_report,
+    confusion_matrix,
+    roc_auc_score,
+    cohen_kappa_score,
+)
+
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from torchvision import models
+from tqdm import tqdm
+
+
+# -----------------------------
+# Config
+# -----------------------------
+class Config:
+    # נתיב לשורש התמונות החדשות של Dried עבור Fine-Tuning
+    # מבנה:
+    # GreenSenseGeneratedPicturesForFineTunning/Dried/Train
+    # GreenSenseGeneratedPicturesForFineTunning/Dried/Validate
+    # GreenSenseGeneratedPicturesForFineTunning/Dried/Test
+    finetune_root_dir = (
+        r"C:\afeca academy\year 2\CVDLP\GreenSpaceQualityProject\GreenSenseGeneratedPicturesForFineTunning"
+    )
+
+    # מודל ViT המאומן הקיים (אותו אחד שמשמש להרצה על Generated)
+    base_model_path = r"outputs_gsq_vit\model_vit_b_16.pt"
+
+    # הגדרות Fine-Tuning
+    batch = 8
+    img_size = 224
+    num_workers = 0
+    epochs = 5
+    lr = 1e-4
+    seed = 42
+
+    # תיקיית פלט למודל החדש והמדדים
+    out_dir = "outputs_vit_finetune_dried"
+
+
+args = Config()
+
+# שמות המחלקות כמו בכל הפרויקט
+CLASS_NAMES = ["Healthy", "Dried", "Contaminated"]
+NUM_CLASSES = len(CLASS_NAMES)
+DRIED_IDX = CLASS_NAMES.index("Dried")  # 1
+
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+
+# -----------------------------
+# Transforms
+# -----------------------------
+def build_train_transform(img_size=224):
+    """
+    אוגמנטציה עדינה ל-Train (אפשר לשנות/להוסיף אם תרצה).
+    כאן אני משאיר משהו עדין כדי לא להרוס את ה-domain של המג'ונרטים.
+    """
+    return A.Compose(
+        [
+            A.HorizontalFlip(p=0.5),
+            A.RandomBrightnessContrast(p=0.3),
+            A.Resize(img_size, img_size),
+        ]
+    )
+
+
+def build_eval_transform(img_size=224):
+    """
+    ל-Validate/Test – רק resize, כמו בהרצות evaluation הקודמות.
+    """
+    return A.Compose([A.Resize(img_size, img_size)])
+
+
+# -----------------------------
+# Dataset
+# -----------------------------
+class DriedFineTuneDataset(Dataset):
+    """
+    Dataset ל-Fine-Tuning על Dried Generated בלבד.
+    מחזיר (x, y), כאשר y תמיד DRIED_IDX (אבל המודל עדיין 3-מחלקות).
+    """
+
+    def __init__(self, files: List[str], labels: List[int], transform=None):
+        self.files = list(files)
+        self.labels = list(labels)
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        path = self.files[idx]
+        y = self.labels[idx]
+
+        img = cv2.imread(path, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError(f"Cannot read image: {path}")
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        if self.transform is not None:
+            img = self.transform(image=img)["image"]
+
+        img = img.astype(np.float32) / 255.0
+        img = (img - IMAGENET_MEAN) / IMAGENET_STD
+        img = np.transpose(img, (2, 0, 1)).astype(np.float32)  # CHW
+
+        x = torch.from_numpy(img)
+        y = torch.tensor(y, dtype=torch.long)
+
+        return x, y
+
+
+# -----------------------------
+# Data utils
+# -----------------------------
+def collect_generated_finetune_files(root_dir: Path, class_names):
+    """
+    root_dir = GreenSenseGeneratedPicturesForFineTunning
+
+    מצפה למבנה:
+      root_dir / <ClassName> / Train
+      root_dir / <ClassName> / Validate
+      root_dir / <ClassName> / Test
+
+    לדוגמה:
+      root_dir/Healthy/Train
+      root_dir/Dried/Train
+      root_dir/Contaminated/Train
+      וכו'...
+    """
+    splits = ["Train", "Validate", "Test"]
+
+    files = {s: [] for s in splits}
+    labels = {s: [] for s in splits}
+
+    exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif", "*.tiff", "*.webp")
+
+    for cls_idx, cls_name in enumerate(class_names):
+        cls_root = root_dir / cls_name
+        assert cls_root.exists(), f"Missing class folder: {cls_root}"
+
+        for split in splits:
+            split_dir = cls_root / split
+            assert split_dir.exists(), f"Missing split folder: {split_dir}"
+
+            for e in exts:
+                for p in split_dir.glob(e):
+                    files[split].append(str(p))
+                    labels[split].append(cls_idx)
+
+    print(
+        "Fine-Tune Generated – "
+        f"Train: {len(files['Train'])}, "
+        f"Val: {len(files['Validate'])}, "
+        f"Test: {len(files['Test'])}"
+    )
+
+    return (
+        files["Train"], labels["Train"],
+        files["Validate"], labels["Validate"],
+        files["Test"], labels["Test"],
+    )
+
+
+# -----------------------------
+# Model
+# -----------------------------
+def build_vit_model(num_classes: int, pretrained: bool = False) -> nn.Module:
+    """
+    ViT-B/16 כמו בקוד evaluation הקיים, עם head מותאם ל-3 מחלקות.
+    """
+    model = models.vit_b_16(
+        weights=models.ViT_B_16_Weights.IMAGENET1K_V1 if pretrained else None
+    )
+    in_features = model.heads.head.in_features
+    model.heads.head = nn.Linear(in_features, num_classes)
+    return model
+
+
+# -----------------------------
+# Training / Eval helpers
+# -----------------------------
+def train_one_epoch(model, loader, optimizer, device, criterion):
+    model.train()
+    running_loss = 0.0
+    all_preds = []
+    all_labels = []
+
+    pbar = tqdm(loader, desc="Train (fine-tune)", leave=False)
+
+    for xb, yb in pbar:
+        xb = xb.to(device)
+        yb = yb.to(device)
+
+        optimizer.zero_grad()
+        logits = model(xb)
+        loss = criterion(logits, yb)
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item() * xb.size(0)
+        preds = torch.argmax(logits, dim=1)
+
+        all_preds.append(preds.detach().cpu().numpy())
+        all_labels.append(yb.detach().cpu().numpy())
+
+        cur_loss = running_loss / max(1, len(all_labels) * loader.batch_size)
+        pbar.set_postfix(loss=f"{cur_loss:.4f}")
+
+    epoch_loss = running_loss / len(loader.dataset)
+    all_preds = np.concatenate(all_preds)
+    all_labels = np.concatenate(all_labels)
+
+    acc = accuracy_score(all_labels, all_preds)
+    return epoch_loss, acc
+
+
+@torch.no_grad()
+def eval_epoch(model, loader, device, criterion, desc="Eval"):
+    model.eval()
+    running_loss = 0.0
+    all_preds = []
+    all_labels = []
+    all_probs = []
+
+    pbar = tqdm(loader, desc=desc, leave=False)
+
+    for xb, yb in pbar:
+        xb = xb.to(device)
+        yb = yb.to(device)
+
+        logits = model(xb)
+        loss = criterion(logits, yb)
+
+        running_loss += loss.item() * xb.size(0)
+        probs = torch.softmax(logits, dim=1)
+        preds = torch.argmax(probs, dim=1)
+
+        all_preds.append(preds.cpu().numpy())
+        all_labels.append(yb.cpu().numpy())
+        all_probs.append(probs.cpu().numpy())
+
+        cur_loss = running_loss / max(1, len(all_labels) * loader.batch_size)
+        pbar.set_postfix(loss=f"{cur_loss:.4f}")
+
+    epoch_loss = running_loss / len(loader.dataset)
+    all_preds = np.concatenate(all_preds)
+    all_labels = np.concatenate(all_labels)
+    all_probs = np.concatenate(all_probs)
+
+    acc = accuracy_score(all_labels, all_preds)
+    return epoch_loss, acc, all_labels, all_preds, all_probs
+
+
+def compute_metrics(y_true_idx, y_pred_idx, y_proba, class_names):
+    num_classes = len(class_names)
+    y_true_oh = np.eye(num_classes)[y_true_idx]
+
+    acc = accuracy_score(y_true_idx, y_pred_idx)
+    prec, rec, f1, _ = precision_recall_fscore_support(
+        y_true_idx, y_pred_idx, average="macro", zero_division=0
+    )
+    kappa = cohen_kappa_score(y_true_idx, y_pred_idx)
+
+    try:
+        rocauc = roc_auc_score(
+            y_true_oh, y_proba, multi_class="ovr", average="macro"
+        )
+    except Exception:
+        rocauc = float("nan")
+
+    report = classification_report(
+        y_true_idx, y_pred_idx, target_names=class_names, digits=4, zero_division=0
+    )
+    cm = confusion_matrix(y_true_idx, y_pred_idx)
+
+    return {
+        "accuracy": acc,
+        "precision_macro": prec,
+        "recall_macro": rec,
+        "f1_macro": f1,
+        "kappa": kappa,
+        "roc_auc_macro_ovr": rocauc,
+        "classification_report": report,
+        "confusion_matrix": cm.tolist(),
+    }
+
+class GeneratedFineTuneDataset(Dataset):
+    def __init__(self, files, labels, transform=None):
+        self.files = list(files)
+        self.labels = list(labels)
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        path = self.files[idx]
+        y = self.labels[idx]
+
+        img = cv2.imread(path, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError(f"Cannot read image: {path}")
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        if self.transform is not None:
+            img = self.transform(image=img)["image"]
+
+        img = img.astype(np.float32) / 255.0
+        img = (img - IMAGENET_MEAN) / IMAGENET_STD
+        img = np.transpose(img, (2, 0, 1)).astype(np.float32)
+
+        x = torch.from_numpy(img)
+        y = torch.tensor(y, dtype=torch.long)
+        return x, y
+
+
+
+# -----------------------------
+# main
+# -----------------------------
+def main():
+    # reproducibility
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    # 1) טעינת קבצים ל-Fine-Tune (Generated – Healthy, Dried, Contaminated)
+    root = Path(args.finetune_root_dir)
+    assert root.exists(), f"Fine-tune root dir not found: {root}"
+
+    (
+        train_files, y_train,
+        val_files,   y_val,
+        test_files,  y_test,
+    ) = collect_generated_finetune_files(root, CLASS_NAMES)
+
+    # 2) Transforms + Datasets + DataLoaders
+    train_tf = build_train_transform(args.img_size)
+    eval_tf = build_eval_transform(args.img_size)
+
+    train_ds = GeneratedFineTuneDataset(train_files, y_train, transform=train_tf)
+    val_ds   = GeneratedFineTuneDataset(val_files,   y_val,   transform=eval_tf)
+    test_ds  = GeneratedFineTuneDataset(test_files,  y_test,  transform=eval_tf)
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=args.batch,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=args.batch,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
+
+    # 3) בניית מודל + טעינת המשקלים הקיימים
+    model = build_vit_model(NUM_CLASSES, pretrained=False)
+    assert os.path.exists(
+        args.base_model_path
+    ), f"Base model not found: {args.base_model_path}"
+    state = torch.load(args.base_model_path, map_location=device)
+    model.load_state_dict(state)
+    model = model.to(device)
+
+    # 4) הקפאת כל הפרמטרים חוץ מה-head
+    for p in model.parameters():
+        p.requires_grad = False
+
+    for p in model.heads.head.parameters():
+        p.requires_grad = True
+
+    # וידוא:
+    trainable_params = [
+        n for n, p in model.named_parameters() if p.requires_grad
+    ]
+    print("Trainable parameters after freezing:")
+    for n in trainable_params:
+        print("  ", n)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr,
+    )
+
+    # 5) לולאת Fine-Tuning
+    best_val_acc = 0.0
+    best_state = None
+
+    history = {
+        "train_loss": [],
+        "train_acc": [],
+        "val_loss": [],
+        "val_acc": [],
+    }
+
+    for epoch in range(1, args.epochs + 1):
+        print(f"\nEpoch {epoch}/{args.epochs}")
+
+        train_loss, train_acc = train_one_epoch(
+            model, train_loader, optimizer, device, criterion
+        )
+        val_loss, val_acc, _, _, _ = eval_epoch(
+            model, val_loader, device, criterion, desc="Val (fine-tune generated)"
+        )
+
+        history["train_loss"].append(train_loss)
+        history["train_acc"].append(train_acc)
+        history["val_loss"].append(val_loss)
+        history["val_acc"].append(val_acc)
+
+        print(
+            f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}"
+        )
+        print(f"  Val   Loss: {val_loss:.4f} | Val   Acc: {val_acc:.4f}")
+
+        if val_acc > best_val_acc + 1e-4:
+            best_val_acc = val_acc
+            best_state = model.state_dict()
+            print("  >>> Improvement on Val, saving best model in memory.")
+        else:
+            print("  No improvement on Val.")
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    # 6) הערכה על Test (Generated – 3 מחלקות)
+    test_loss, test_acc, y_true, y_pred, y_proba = eval_epoch(
+        model, test_loader, device, criterion, desc="Test (Generated 3-classes)"
+    )
+
+    print("\n=== Fine-Tuned Model – Evaluation on Generated Test (3 classes) ===")
+    print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f}")
+
+    metrics = compute_metrics(y_true, y_pred, y_proba, CLASS_NAMES)
+    for k in [
+        "accuracy",
+        "precision_macro",
+        "recall_macro",
+        "f1_macro",
+        "kappa",
+        "roc_auc_macro_ovr",
+    ]:
+        print(f"{k}: {metrics[k]}")
+
+    print("\nClassification Report:\n")
+    print(metrics["classification_report"])
+    print("\nConfusion Matrix:\n")
+    print(np.array(metrics["confusion_matrix"]))
+
+    # 7) שמירת מודל ומדדים
+    model_path = Path(args.out_dir) / "model_vit_b_16_finetuned_generated_3classes.pt"
+    torch.save(model.state_dict(), model_path)
+    print(f"\nSaved fine-tuned model to: {model_path}")
+
+    metrics_path = Path(args.out_dir) / "metrics_finetune_generated_3classes.json"
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
+    print(f"Saved metrics to: {metrics_path}")
+
+    hist_path = Path(args.out_dir) / "history_finetune_generated_3classes.json"
+    with open(hist_path, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+    print(f"Saved training history to: {hist_path}")
+
+    print("\nAll done (Fine-Tune on Generated – Healthy/Dried/Contaminated).")
+
+
+
+if __name__ == "__main__":
+    main()
